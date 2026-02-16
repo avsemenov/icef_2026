@@ -1,7 +1,7 @@
 ---
 title: "R for Finance Report Examples"
-author: "AS"
-format: pdf
+author: "Alexandr Semenov"
+format: docx
 editor: visual
 ---
 
