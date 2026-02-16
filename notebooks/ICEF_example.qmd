@@ -1,0 +1,253 @@
+---
+title: "R for Finance Report Examples"
+author: "AS"
+format: pdf
+editor: visual
+---
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(santimentR)
+library(forecast) 
+```
+
+# API-Key Management
+
+The "Golden Rule" of API keys is: **Never hardcode credentials directly into your script.**
+
+If you type api_key \<- "abc12345" in your code, you risk accidentally committing it to GitHub or sharing it with a colleague, which compromises your security.
+
+The easiest solution is to add it to `.Renviron`, which works the same way as `.env` file in Python. You store variables in a hidden text file that R loads automatically when it starts.
+
+**1. Setup your key**\
+The easiest way to edit this file is using the `usethis` package:
+
+```{r}
+# install.packages("usethis")
+usethis::edit_r_environ()
+```
+
+This opens a file called `.Renviron`. Add your key there on a new line:
+
+``` txt
+MY_API_KEY="12345-secret-key"
+```
+
+**2. Restart R**\
+**Important:** You must restart your R session for these changes to take effect (`Session -> Restart R`).
+
+**3. Use the key in your code**\
+Now, you can access the key using `Sys.getenv()`:
+
+```{r}
+my_key <- Sys.getenv("MY_API_KEY")
+
+# Check if it loaded correctly
+if (my_key == "") stop("API Key not found! Check .Renviron")
+```
+
+**4. Safety Check**\
+Ensure your `.gitignore` file includes `.Renviron` so git does not track it.
+
+# Getting crypto assets data via Santiment API
+
+Initialize Santiment client
+
+```{r}
+#| echo: false
+api_key <- Sys.getenv("SANTIMENT_API_KEY")
+client <- init_client(api_key = api_key) 
+```
+
+# Get Data via SantimentR
+
+We will fetch daily USD price data for four major coins: Bitcoin, Ethereum, Cardano, and Solana.
+
+```{r}
+slugs <- c("bitcoin", "ethereum", "cardano", "solana")
+from_date <- "2025-01-01T00:00:00Z"
+to_date <- "2026-01-15T00:00:00Z"
+interval <- "1d"
+```
+
+### Fetching metrics for all slugs at once.
+
+Sometimes it doesn't work (LoL) for long intervals \~1 year.
+
+```{r}
+raw_data <- map_df(slugs, function(s) {
+  get_metrics(client, metric = "price_usd", slug = s, 
+              from_date = from_date, to_date = to_date, 
+              interval = interval) %>%
+    mutate(slug = s)
+})
+```
+
+### Alternative way: getting time series for each slug separately
+
+```{r}
+btc <- get_metric(client, metric = 'price_usd',
+                   slug = "bitcoin", from_date = from_date,
+                   to_date = to_date,
+                   interval = interval)
+
+eth <- get_metric(client, metric = 'price_usd',
+                  slug = "ethereum", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+
+ada <- get_metric(client, metric = 'price_usd',
+                  slug = "cardano", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+
+sol <- get_metric(client, metric = 'price_usd',
+                  slug = "solana", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+
+# Combine 4 dataframes into 1 dataframe
+raw_data <- bind_rows("btc"=btc, 
+                      "eth"=eth, 
+                      "ada"=ada, 
+                      "sol"=sol, 
+                      .id = "slug")
+```
+
+### Another way to have some overview of the data
+
+```{r}
+glimpse(raw_data)
+
+```
+
+# Visualization
+
+### Separate graphs for the prices
+
+```{r}
+ggplot(raw_data, aes(x = datetime, y = value, color = slug)) +
+  geom_line(linewidth = 1) + 
+  facet_wrap(~ slug, scales = "free_y") + # Facet to see individual scales
+  theme_minimal() +
+  labs(title = "Cryptocurrency Price Trends (2025-2025)",
+       x = "Date", y = "Price (USD)", color = "Asset")
+```
+
+### Pivot data from long to wide format for convenience
+
+```{r}
+wide_data <- raw_data %>%
+  pivot_wider(names_from = slug, values_from = value) %>%
+  drop_na()
+```
+
+### Making correlation matrix the tidy way
+
+```{r}
+wide_data %>% 
+  select(-datetime) %>% 
+  cor() -> cor_matrix
+
+cor_matrix
+```
+
+### Simple correlation visualization from correlation matrix
+
+```{r}
+corrplot::corrplot(cor_matrix, method = 'number', type = 'upper',
+                   title = "Price Correlation Matrix")
+```
+
+### Fancy correlation visualization from the data in wide format
+
+```{r}
+GGally::ggpairs(
+  data = wide_data,
+  columns = 2:5
+) +
+  tidyquant::scale_fill_tq() +
+  tidyquant::scale_color_tq()
+```
+
+# Forecasting
+
+Let's use BTC as an example
+
+## Getting the data
+
+We did it already in this notebook, but just for a reminder:
+
+```{r}
+btc <- get_metrics(client, metric = 'price_usd',
+                   slug = "bitcoin", 
+                   from_date = from_date,
+                   to_date = to_date,
+                   interval = interval)
+```
+
+## Create target variable
+
+```{r}
+btc_data <- btc %>% 
+  arrange(datetime) %>%
+  mutate(next_day_price = lead(price_usd)) %>% # Our target variable
+  drop_na()
+```
+
+## Linear regression model
+
+```{r}
+lm_model <- lm(next_day_price ~ price_usd, data = btc_data)
+summary(lm_model)
+```
+
+## Plotting some model quality graphs
+
+```{r}
+par(mfrow = c(1, 2))
+plot(lm_model, which = 1:2)
+```
+
+## ARIMA model with Auto.ARIMA
+
+```{r}
+btc_ts <- ts(btc_data$price_usd, frequency = 365)
+arima_model <- auto.arima(btc_ts)
+summary(arima_model)
+```
+
+## Plotting forcast from ARIMA model
+
+```{r}
+arima_forecast <- forecast(arima_model, h = 1)
+plot(arima_forecast)
+```
+
+## Comparing forecast accuracy
+
+```{r}
+lm_preds <- predict(lm_model, btc_data)
+arima_preds <- fitted(arima_model)
+
+rmse_lm <- sqrt(mean((btc_data$next_day_price - lm_preds)^2))
+rmse_arima <- sqrt(mean((btc_data$price_usd - arima_preds)^2))
+
+performance_comparison <- tibble(
+  Model = c("Linear Regression", "ARIMA"),
+  RMSE = c(rmse_lm, rmse_arima)
+)
+print(performance_comparison)
+```
+
+# Conclusion
+
+This notebook successfully integrated Santiment data with Tidyverse tools to analyze and predict cryptocurrency movements via linear regression and ARIMA.
+
+## Key Considerations from the Sources:
+
+-   **Data Structure**: The code prioritizes the **long format** for visualization with `ggplot2` and the **wide format** for calculating correlations.
+-   **Modeling Assumptions**: When reviewing the Linear Regression results, pay attention to the **Residuals vs Fitted** plot to check for homoscedasticity and the **Normal Q-Q** plot for normality of residuals.
+-   **Tooling**: The use of `pivot_longer()` and `pivot_wider()` ensures the data is "tidy" before it enters the analytical pipeline.

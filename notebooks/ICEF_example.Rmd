@@ -1,0 +1,229 @@
+---
+editor_options:
+  markdown:
+    wrap: 72
+output:
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+library(santimentR)
+library(forecast) 
+```
+
+# Initialize Santiment client
+# Replace 'YOUR_API_KEY' with your actual Santiment API key
+
+```{r}
+api_key <- Sys.getenv("SANTIMENT_API_KEY")
+client <- init_client(api_key = api_key) 
+```
+1. Get Data via SantimentR
+
+We will fetch daily USD price data for four major coins: Bitcoin, Ethereum, Cardano, and Solana.
+
+```{r}
+slugs <- c("bitcoin", "ethereum", "cardano", "solana")
+from_date <- "2025-01-01T00:00:00Z"
+to_date <- "2025-02-15T00:00:00Z"
+interval <- "1d"
+```
+
+# Fetching metrics for all slugs at once.
+
+Sometimes it doesn't work (LoL) for long intervals ~1 year.
+
+```{r}
+raw_data <- map_df(slugs, function(s) {
+  get_metrics(client, metrics = "price_usd", slug = s, 
+              from_date = from_date, to_date = to_date, 
+              interval = interval) %>%
+    mutate(slug = s)
+})
+```
+
+# Fetching metrics for each asset separately.
+
+```{r}
+btc <- get_metric(client, metric = 'price_usd',
+                   slug = "bitcoin", from_date = from_date,
+                   to_date = to_date,
+                   interval = interval)
+
+eth <- get_metric(client, metric = 'price_usd',
+                  slug = "ethereum", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+
+ada <- get_metric(client, metric = 'price_usd',
+                  slug = "cardano", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+
+sol <- get_metric(client, metric = 'price_usd',
+                  slug = "solana", from_date = from_date,
+                  to_date = to_date,
+                  interval = interval)
+# Gather 4 dfs into 1 df
+raw_data <- bind_rows("btc"=btc, 
+                      "eth"=eth, 
+                      "ada"=ada, 
+                      "sol"=sol, 
+                      .id = "slug") %>% 
+  select(-value)
+```
+
+
+# Display a concise view of the tibble
+```{r}
+glimpse(raw_data)
+
+```
+
+      
+2. Calculate and Visualize Correlations
+
+To calculate correlations, we must reshape the data from a **long format** (tidy) to a **wide format**, where each coin has its own column.
+
+# Reshape to wide format for correlation matrix
+
+```{r}
+wide_data <- raw_data %>%
+  select(datetime, slug, price_usd) %>%
+  pivot_wider(names_from = slug, values_from = price_usd) %>%
+  drop_na() # Handling missing values before correlation
+```
+
+
+# Calculate Correlation Matrix
+
+```{r}
+cor_matrix <- cor(wide_data %>% select(-datetime))
+print(cor_matrix)
+```
+
+
+# Simple visualization of correlations using base R (as a heatmap)
+
+```{r}
+heatmap(cor_matrix, main = "Price Correlation Matrix")
+```
+
+      
+
+3. Reshape Data for ggplot of Prices
+
+Using the **Grammar of Graphics**, we map variables to aesthetics like color and x/y locations. We use `pivot_longer` to prepare the data for multi-asset plotting.
+
+```{r}
+# ggplot2 expects tidy (long) data
+ggplot(raw_data, aes(x = datetime, y = price_usd, color = slug)) +
+  geom_line(linewidth = 1) + 
+  facet_wrap(~ slug, scales = "free_y") + # Facet to see individual scales
+  theme_minimal() +
+  labs(title = "Cryptocurrency Price Trends (2025-2025)",
+       x = "Date", y = "Price (USD)", color = "Asset")
+```
+        
+
+4. Linear Regression Model
+
+We build an OLS regression to predict the "next day's price" by creating a lagged variable using `lead()` or `lag()`.
+
+
+# Focusing on Bitcoin for the predictive models
+```{r}
+btc_data <- raw_data %>% 
+  filter(slug == "bitcoin") %>%
+  arrange(datetime) %>%
+  mutate(next_day_price = lead(price_usd)) %>% # Our target variable
+  drop_na()
+```
+
+
+# Building the Linear Model (OLS)
+```{r}
+lm_model <- lm(next_day_price ~ price_usd, data = btc_data)
+summary(lm_model)
+```
+
+# Diagnostic plots: Residuals vs Fitted and Normal Q-Q [15]
+```{r}
+par(mfrow = c(1, 2))
+plot(lm_model, which = 1:2)
+```
+
+5. ARIMA Model
+
+As specified in the syllabus, ARIMA is used for time-series forecasting.
+
+
+# Convert price to a time series object (ts)
+```{r}
+btc_ts <- ts(btc_data$price_usd, frequency = 365)
+```
+
+
+
+# Fit an auto-ARIMA model
+```{r}
+arima_model <- auto.arima(btc_ts)
+summary(arima_model)
+```
+
+
+
+# Forecast for the next day
+```{r}
+arima_forecast <- forecast(arima_model, h = 1)
+plot(arima_forecast)
+```
+
+6. Performance Comparison
+
+We compare the performance using metrics like **MSE (Mean Squared Error)** or **RMSE**, as suggested in the sources.
+
+# Calculate predictions for both models on training data
+```{r}
+lm_preds <- predict(lm_model, btc_data)
+arima_preds <- fitted(arima_model)
+```
+
+
+# Calculate RMSE for comparison
+```{r}
+rmse_lm <- sqrt(mean((btc_data$next_day_price - lm_preds)^2))
+rmse_arima <- sqrt(mean((btc_data$price_usd - arima_preds)^2))
+```
+
+
+# Resulting comparison table
+```{r}
+performance_comparison <- tibble(
+  Model = c("Linear Regression", "ARIMA"),
+  RMSE = c(rmse_lm, rmse_arima)
+)
+print(performance_comparison)
+```
+
+7. Conclusion
+
+This notebook successfully integrated Santiment data with Tidyverse tools to analyze and predict cryptocurrency movements. Linear regression offers a simple baseline, while ARIMA accounts for the temporal dependencies inherent in financial time series.
+
+
+### Key Considerations from the Sources:
+
+-   **Data Structure**: The code prioritizes the **long format** for
+    visualization with `ggplot2` and the **wide format** for calculating
+    correlations [6, 7].
+-   **Modeling Assumptions**: When reviewing the Linear Regression
+    results, pay attention to the **Residuals vs Fitted** plot to check
+    for homoscedasticity and the **Normal Q-Q** plot for normality of
+    residuals [15].
+-   **Tooling**: The use of `pivot_longer()` and `pivot_wider()` ensures
+    the data is "tidy" before it enters the analytical pipeline [2, 18].
+
